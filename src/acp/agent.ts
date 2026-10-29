@@ -10,6 +10,8 @@ import {
   type ListSessionsResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
   type NewSessionRequest,
   type PromptRequest,
   type PromptResponse,
@@ -19,7 +21,6 @@ import {
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
-  type StopReason,
   type DeleteSessionRequest,
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
@@ -265,6 +266,7 @@ export class PiAcpAgent implements ACPAgent {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
           // Enables a native session picker in clients that support it.
           list: {},
+          resume: {},
           delete: {}
         }
       }
@@ -884,13 +886,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined)
-
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
-
+    const stopReason = await session.prompt(message, images, promptToSessionTitle(params.prompt) ?? undefined)
     return { stopReason }
   }
 
@@ -930,6 +926,14 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    return this.restoreExistingSession(params, true)
+  }
+
+  async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    return this.restoreExistingSession({ ...params, mcpServers: params.mcpServers ?? [] }, false)
+  }
+
+  private async restoreExistingSession(params: LoadSessionRequest, replay: boolean): Promise<LoadSessionResponse> {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
@@ -974,7 +978,7 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
+    const data = replay ? (await proc.getMessages()) as any : null
     const messages = Array.isArray(data?.messages) ? data.messages : []
 
     for (const m of messages) {

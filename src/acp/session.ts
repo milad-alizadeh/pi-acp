@@ -42,7 +42,7 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'cancelled'
 
 type PendingTurn = {
   title?: string
@@ -298,6 +298,7 @@ export class PiAcpSession {
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
   private cancelRequested = false
+  private turnError: string | null = null
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
@@ -517,8 +518,13 @@ export class PiAcpSession {
     // delivered before we resolve the ACP `session/prompt` request.
     await this.publishContextUsage()
 
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-    this.pendingTurn?.resolve(reason)
+    if (this.cancelRequested) {
+      this.pendingTurn?.resolve('cancelled')
+    } else if (this.turnError !== null) {
+      this.pendingTurn?.reject(RequestError.internalError(undefined, this.turnError))
+    } else {
+      this.pendingTurn?.resolve('end_turn')
+    }
     this.pendingTurn = null
     this.inAgentLoop = false
 
@@ -594,6 +600,7 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
+    this.turnError = null
     this.inAgentLoop = false
 
     this.pendingTurn = { title: t.title, resolve: t.resolve, reject: t.reject }
@@ -614,11 +621,12 @@ export class PiAcpSession {
       void this.flushEmits().finally(() => {
         // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
         const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
+        if (this.cancelRequested) {
+          this.pendingTurn?.resolve('cancelled')
         } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
+          this.pendingTurn?.reject(
+            authErr ?? RequestError.internalError(undefined, err instanceof Error ? err.message : String(err))
+          )
         }
 
         this.pendingTurn = null
@@ -642,6 +650,14 @@ export class PiAcpSession {
       case 'session_info_changed': {
         const name = (ev as { name?: unknown }).name
         if (typeof name === 'string' || name === undefined) this.publishTitle(name ?? null)
+        break
+      }
+
+      case 'message_end': {
+        const message = (ev as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message
+        if (message?.role === 'assistant') {
+          this.turnError = message.stopReason === 'error' ? message.errorMessage || 'Pi request failed' : null
+        }
         break
       }
 
@@ -917,6 +933,10 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_end': {
+        const retry = ev as { success?: boolean; finalError?: string }
+        if (retry.success === false) {
+          this.turnError = retry.finalError || this.turnError || 'Pi retries exhausted'
+        }
         this.emit({
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock

@@ -96,6 +96,13 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
     }
 
     try {
+      assert.deepEqual((await agent.initialize({ protocolVersion: 1, clientCapabilities: {} })).agentCapabilities?.sessionCapabilities?.resume, {})
+      await agent.resumeSession({ sessionId: 'sess-1', cwd: '/tmp/project', mcpServers: [] })
+      assert.equal(conn.updates.some(u => ['user_message_chunk', 'agent_message_chunk'].includes((u as any).update?.sessionUpdate)), false)
+
+      await new Promise(r => setTimeout(r, 0))
+      await new Promise(r => setTimeout(r, 0))
+      conn.updates.length = 0
       await agent.loadSession({ sessionId: 'sess-1', cwd: '/tmp/project', mcpServers: [], _meta: null } as any)
 
       // loadSession should have replayed messages as session/update notifications.
